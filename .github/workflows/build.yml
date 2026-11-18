@@ -1,0 +1,69 @@
+name: Build Nacre
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            pluginval: pluginval_Windows.zip
+          - name: macOS
+            os: macos-14
+            pluginval: pluginval_macOS.zip
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "macOS" ]; then EXTRA='-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13'; fi
+          cmake -B build -DCMAKE_BUILD_TYPE=Release $EXTRA
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Engine tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Validate VST3 with pluginval (strictness 10)
+        shell: bash
+        run: |
+          curl -sSL -o pv.zip "https://github.com/Tracktion/pluginval/releases/latest/download/${{ matrix.pluginval }}"
+          unzip -q -o pv.zip
+          VST3=$(find build -type d -name "Nacre.vst3" | head -1)
+          if [ "${{ runner.os }}" = "Windows" ]; then PV=./pluginval.exe; else PV=./pluginval.app/Contents/MacOS/pluginval; fi
+          "$PV" --strictness-level 10 --skip-gui-tests --timeout-ms 600000 --validate "$VST3"
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          VST3=$(find build -type d -name "Nacre.vst3" | head -1)
+          cp -R "$VST3" dist/
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "$(find build -name 'Nacre.exe' | head -1)" dist/ || true
+            cp tools/install-windows.ps1 dist/
+          else
+            cp -R "$(find build -type d -name 'Nacre.component' | head -1)" dist/ || true
+            cp -R "$(find build -type d -name 'Nacre.app' | head -1)" dist/ || true
+          fi
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            for b in dist/*.vst3 dist/*.component dist/*.app; do [ -e "$b" ] && codesign --force --deep -s - "$b"; done
+            cp tools/install-mac.command dist/ && chmod +x dist/install-mac.command
+          fi
+          cp README.md dist/
+          cp plugin/fonts/OFL.txt dist/FONT-LICENSE.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nacre-${{ matrix.name }}
+          path: dist
